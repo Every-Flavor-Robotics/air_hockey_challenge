@@ -26,13 +26,13 @@ run = wandb.init(
 
 
 # Parallel environments
-vec_env = make_vec_env(get_env, n_envs=12)
+vec_env = make_vec_env(get_env, n_envs=16)
 
 model = PPO(
     "MlpPolicy", vec_env, verbose=1, device="cpu", tensorboard_log=f"runs/{run.id}"
 )
 model.learn(
-    total_timesteps=250000,
+    total_timesteps=2500000,
     callback=WandbCallback(
         gradient_save_freq=100,
         model_save_path=f"models/{run.id}",
@@ -42,3 +42,7 @@ model.learn(
 
 
 run.finish()
+
+
+# Save the model
+model.save("ppo_air_hockey")

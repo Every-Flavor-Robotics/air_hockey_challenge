@@ -2,6 +2,7 @@ from copy import deepcopy
 
 # gym
 import gymnasium as gym
+import numpy as np
 from mushroom_rl.core import Environment
 
 from air_hockey_challenge.constraints import *
@@ -147,6 +148,17 @@ class AirHockeyChallengeGymWrapper(gym.Env):
     def __init__(
         self, env, custom_reward_function=None, interpolation_order=3, **kwargs
     ):
+
+        if custom_reward_function is None:
+
+            def custom_reward_function(self, state, action, next_state, absorbing):
+                puck_pos = next_state[0:2]
+
+                # Compute error from (1.948/2, 0)
+                error = np.linalg.norm(puck_pos - np.array([1.948 / 2, 0]))
+
+                return -error
+
         self.env = AirHockeyChallengeWrapper(
             env, custom_reward_function, interpolation_order, **kwargs
         )
