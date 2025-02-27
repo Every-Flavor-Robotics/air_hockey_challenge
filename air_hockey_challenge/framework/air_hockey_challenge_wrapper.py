@@ -154,10 +154,16 @@ class AirHockeyChallengeGymWrapper(gym.Env):
             def custom_reward_function(self, state, action, next_state, absorbing):
                 puck_pos = next_state[0:2]
 
-                # Compute error from (1.948/2, 0)
-                error = np.linalg.norm(puck_pos - np.array([1.948 / 2, 0]))
+                # Encourage making the puck go as positive as possible
+                # Get sign of puck position
+                sign = np.sign(puck_pos[0])
 
-                return -error
+                puck_reward = sign * puck_pos[0] ** 2
+
+                # Penalize high joint velocities
+                joint_vel_reward = -0.001 * np.sum(next_state[9:12] ** 2)
+
+                return puck_reward + joint_vel_reward
 
         self.env = AirHockeyChallengeWrapper(
             env, custom_reward_function, interpolation_order, **kwargs
