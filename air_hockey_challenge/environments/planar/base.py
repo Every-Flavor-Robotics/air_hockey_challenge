@@ -1,6 +1,7 @@
 import os
 
 import mujoco
+from mujoco import mjx
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
@@ -128,6 +129,9 @@ class AirHockeyBase(MuJoCo):
             os.path.join(os.path.dirname(os.path.abspath(env_path)), "planar_robot_1.xml"))
         robot_model.body('planar_robot_1/base').pos = np.zeros(3)
         robot_data = mujoco.MjData(robot_model)
+
+        self.mjx_model = mjx.put_model(robot_model)
+        self.mjx_data = mjx.put_data(robot_model, robot_data)
 
         # Add env_info that requires mujoco models
         self.env_info['dt'] = self.dt

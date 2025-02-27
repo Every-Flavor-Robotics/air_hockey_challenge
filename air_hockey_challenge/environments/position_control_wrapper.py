@@ -1,12 +1,40 @@
 from collections import deque
 
 import mujoco
+from mujoco import mjx
+import jax.numpy as jnp
+
+from jax import jit
+import jax
+
 import numpy as np
 import scipy
 
 from air_hockey_challenge.environments import iiwas as iiwas
 from air_hockey_challenge.environments import planar as planar
 from air_hockey_challenge.utils import inverse_kinematics
+
+
+# Helper: build block-diagonal matrix from one block repeated n times.
+def block_diag(coef, n):
+    # coef shape: (r, r). We create a block diagonal matrix of shape (n*r, n*r)
+    return jnp.kron(jnp.eye(n), coef)
+
+
+# Helper: Evaluate a polynomial with coefficients in ascending order.
+def poly_eval(x, coeffs):
+    # coeffs is assumed to be in ascending order,
+    # with shape (degree+1, n) for n polynomials.
+    powers = jnp.arange(coeffs.shape[0]).reshape(-1, 1)
+    return jnp.sum(coeffs * (x**powers), axis=0)
+
+
+# Helper: Compute the derivative of a polynomial (coefficients in ascending order)
+def poly_der(coeffs):
+    # For a polynomial c0 + c1*x + c2*x^2 + ...,
+    # the derivative has coefficients: [c1, 2*c2, 3*c3, ...].
+    order = coeffs.shape[0]
+    return coeffs[1:] * jnp.arange(1, order).reshape(-1, 1)
 
 
 class PositionControl:
@@ -140,10 +168,14 @@ class PositionControl:
             self.robot_data.qpos = current_pos[robot_joint_ids]
             self.robot_data.qvel = current_vel[robot_joint_ids]
             acc_ff = desired_acc[robot_joint_ids]
-            mujoco.mj_forward(self.robot_model, self.robot_data)
 
-            mujoco.mj_mulM(self.robot_model, self.robot_data, tau_ff, acc_ff)
-            torque[robot_joint_ids] += tau_ff
+            acc_ff_jax = jnp.asarray(acc_ff)
+            acc_ff_jax = jnp.expand_dims(jnp.asarray(acc_ff), axis=-1)
+
+            mjx.forward(self.mjx_model, self.mjx_data)
+
+            tau_ff = mjx.mul_m(self.mjx_model, self.mjx_data, acc_ff_jax)
+            torque[robot_joint_ids] += tau_ff.squeeze()
 
             # Gravity Compensation and Coriolis and Centrifugal force
             torque[robot_joint_ids] += self.robot_data.qfrc_bias
@@ -173,25 +205,28 @@ class PositionControl:
 
     def _interpolate_trajectory(self, interp_order, action, i=0):
         tf = self.dt
-        prev_pos = self.prev_pos[
-            i * self.n_robot_joints : (i + 1) * self.n_robot_joints
-        ]
-        prev_vel = self.prev_vel[
-            i * self.n_robot_joints : (i + 1) * self.n_robot_joints
-        ]
-        prev_acc = self.prev_acc[
-            i * self.n_robot_joints : (i + 1) * self.n_robot_joints
-        ]
+        # Extract the relevant segments and convert to JAX arrays.
+        prev_pos = jnp.array(
+            self.prev_pos[i * self.n_robot_joints : (i + 1) * self.n_robot_joints]
+        )
+        prev_vel = jnp.array(
+            self.prev_vel[i * self.n_robot_joints : (i + 1) * self.n_robot_joints]
+        )
+        prev_acc = jnp.array(
+            self.prev_acc[i * self.n_robot_joints : (i + 1) * self.n_robot_joints]
+        )
+
+        # Select the proper interpolation order and construct the coefficient matrix.
         if interp_order == 1 and action.ndim == 1:
-            coef = np.array([[1, 0], [1, tf]])
-            results = np.vstack([prev_pos, action])
+            coef = jnp.array([[1, 0], [1, tf]])
+            results = jnp.vstack([prev_pos, action])
         elif interp_order == 2 and action.ndim == 1:
-            coef = np.array([[1, 0, 0], [1, tf, tf**2], [0, 1, 0]])
-            if np.linalg.norm(action - prev_pos) < 1e-3:
-                prev_vel = np.zeros_like(prev_vel)
-            results = np.vstack([prev_pos, action, prev_vel])
+            coef = jnp.array([[1, 0, 0], [1, tf, tf**2], [0, 1, 0]])
+            if jnp.linalg.norm(action - prev_pos) < 1e-3:
+                prev_vel = jnp.zeros_like(prev_vel)
+            results = jnp.vstack([prev_pos, action, prev_vel])
         elif interp_order == 3 and action.shape[0] == 2:
-            coef = np.array(
+            coef = jnp.array(
                 [
                     [1, 0, 0, 0],
                     [1, tf, tf**2, tf**3],
@@ -199,9 +234,9 @@ class PositionControl:
                     [0, 1, 2 * tf, 3 * tf**2],
                 ]
             )
-            results = np.vstack([prev_pos, action[0], prev_vel, action[1]])
+            results = jnp.vstack([prev_pos, action[0], prev_vel, action[1]])
         elif interp_order == 4 and action.shape[0] == 2:
-            coef = np.array(
+            coef = jnp.array(
                 [
                     [1, 0, 0, 0, 0],
                     [1, tf, tf**2, tf**3, tf**4],
@@ -210,9 +245,9 @@ class PositionControl:
                     [0, 0, 2, 0, 0],
                 ]
             )
-            results = np.vstack([prev_pos, action[0], prev_vel, action[1], prev_acc])
+            results = jnp.vstack([prev_pos, action[0], prev_vel, action[1], prev_acc])
         elif interp_order == 5 and action.shape[0] == 3:
-            coef = np.array(
+            coef = jnp.array(
                 [
                     [1, 0, 0, 0, 0, 0],
                     [1, tf, tf**2, tf**3, tf**4, tf**5],
@@ -222,54 +257,64 @@ class PositionControl:
                     [0, 0, 2, 6 * tf, 12 * tf**2, 20 * tf**3],
                 ]
             )
-            results = np.vstack(
+            results = jnp.vstack(
                 [prev_pos, action[0], prev_vel, action[1], prev_acc, action[2]]
             )
         elif interp_order == -1:
-            # Interpolate position and velocity linearly
-            pass
+            # Interpolate position and velocity linearly; not implemented here.
+            raise NotImplementedError("interp_order -1 not implemented in JAX version")
         else:
             raise ValueError(
                 "Undefined interpolator order or the action dimension does not match!"
             )
 
         if interp_order > 0:
-            A = scipy.linalg.block_diag(*[coef] * self.n_robot_joints)
-            y = results.reshape(-2, order="F")
-            weights = np.linalg.solve(A, y).reshape(
+            # Construct the block diagonal matrix A.
+            A = block_diag(coef, self.n_robot_joints)
+            # Flatten results in Fortran order. jnp.reshape does not support 'F' order,
+            # so we mimic it by transposing first.
+            y = results.T.flatten()
+            weights = jnp.linalg.solve(A, y).reshape(
                 self.n_robot_joints, interp_order + 1
             )
-            weights_d = np.polynomial.polynomial.polyder(weights, axis=1)
-            weights_dd = np.polynomial.polynomial.polyder(weights_d, axis=1)
+            weights_d = poly_der(weights)
+            weights_dd = poly_der(weights_d)
         elif interp_order == -1:
-            weights = np.vstack([prev_pos, (action[0] - prev_pos) / self.dt]).T
-            weights_d = np.vstack([prev_vel, (action[1] - prev_vel) / self.dt]).T
-            weights_dd = np.polynomial.polynomial.polyder(weights_d, axis=1)
+            weights = jnp.vstack([prev_pos, (action[0] - prev_pos) / self.dt]).T
+            weights_d = jnp.vstack([prev_vel, (action[1] - prev_vel) / self.dt]).T
+            weights_dd = poly_der(weights_d)
 
+        # Update jerk information.
         if interp_order in [3, 4, 5]:
-            self.jerk[i * self.n_robot_joints : (i + 1) * self.n_robot_joints] = (
-                np.abs(weights_dd[:, 1])
-                + np.abs(weights_dd[:, 0] - prev_acc) / self._timestep
+            jerk_val = (
+                jnp.abs(weights_dd[:, 1])
+                + jnp.abs(weights_dd[:, 0] - prev_acc) / self._timestep
             )
+            self.jerk = self.jerk.at[
+                i * self.n_robot_joints : (i + 1) * self.n_robot_joints
+            ].set(jerk_val)
         else:
-            self.jerk[i * self.n_robot_joints : (i + 1) * self.n_robot_joints] = (
-                np.ones_like(prev_acc) * np.inf
-            )
+            self.jerk = self.jerk.at[
+                i * self.n_robot_joints : (i + 1) * self.n_robot_joints
+            ].set(jnp.ones_like(prev_acc) * jnp.inf)
 
-        self.prev_pos[i * self.n_robot_joints : (i + 1) * self.n_robot_joints] = (
-            np.polynomial.polynomial.polyval(tf, weights.T)
-        )
-        self.prev_vel[i * self.n_robot_joints : (i + 1) * self.n_robot_joints] = (
-            np.polynomial.polynomial.polyval(tf, weights_d.T)
-        )
-        self.prev_acc[i * self.n_robot_joints : (i + 1) * self.n_robot_joints] = (
-            np.polynomial.polynomial.polyval(tf, weights_dd.T)
-        )
+        # Update state using polynomial evaluation.
+        self.prev_pos = self.prev_pos.at[
+            i * self.n_robot_joints : (i + 1) * self.n_robot_joints
+        ].set(poly_eval(tf, weights.T))
+        self.prev_vel = self.prev_vel.at[
+            i * self.n_robot_joints : (i + 1) * self.n_robot_joints
+        ].set(poly_eval(tf, weights_d.T))
+        self.prev_acc = self.prev_acc.at[
+            i * self.n_robot_joints : (i + 1) * self.n_robot_joints
+        ].set(poly_eval(tf, weights_dd.T))
 
-        for t in np.linspace(self._timestep, self.dt, self._n_intermediate_steps):
-            q = np.polynomial.polynomial.polyval(t, weights.T)
-            qd = np.polynomial.polynomial.polyval(t, weights_d.T)
-            qdd = np.polynomial.polynomial.polyval(t, weights_dd.T)
+        # Yield intermediate steps computed via jnp.linspace.
+        # (Note: if you plan to jit this function, using yield may require a different approach.)
+        for t in jnp.linspace(self._timestep, self.dt, self._n_intermediate_steps):
+            q = poly_eval(t, weights.T)
+            qd = poly_eval(t, weights_d.T)
+            qdd = poly_eval(t, weights_dd.T)
             yield q, qd, qdd
 
     def reset(self, obs=None):

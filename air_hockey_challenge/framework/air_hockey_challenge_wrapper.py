@@ -2,12 +2,16 @@ from copy import deepcopy
 
 # gym
 import gymnasium as gym
+import jax
+import functools
 import numpy as np
 from mushroom_rl.core import Environment
 
 from air_hockey_challenge.constraints import *
 from air_hockey_challenge.environments import position_control_wrapper as position
 from air_hockey_challenge.utils import robot_to_world
+
+from stable_baselines3.common.vec_env import VecEnv
 
 
 class AirHockeyChallengeWrapper(Environment):
@@ -149,22 +153,29 @@ class AirHockeyChallengeGymWrapper(gym.Env):
         self, env, custom_reward_function=None, interpolation_order=3, **kwargs
     ):
 
+        super().__init__()
+
+        self.render_mode = "human"
+
         if custom_reward_function is None:
 
             def custom_reward_function(self, state, action, next_state, absorbing):
                 puck_pos = next_state[0:2]
 
-                # Compute error from (1.948/2, 0)
-                error = np.linalg.norm(puck_pos - np.array([1.948 / 2, 0]))
+                # Encourage making the puck go as positive as possible
+                # Get sign of puck position
+                sign = np.sign(puck_pos[0])
 
-                return -error
+                puck_reward = sign * puck_pos[0] ** 2
+
+                # Penalize high joint velocities
+                joint_vel_reward = -0.001 * np.sum(next_state[9:12] ** 2)
+
+                return puck_reward + joint_vel_reward
 
         self.env = AirHockeyChallengeWrapper(
             env, custom_reward_function, interpolation_order, **kwargs
         )
-
-        # print(type(self.env.env_info["rl_info"].action_space))
-        # exit()
 
         # Convert mushroom rl Box to gym Box
         self.action_space = gym.spaces.Box(
@@ -180,11 +191,20 @@ class AirHockeyChallengeGymWrapper(gym.Env):
             dtype=np.float32,
         )
 
+        self.steps = 0
+
+    @functools.partial(jax.vmap, in_axes=(None, 0))
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
+        self.steps += 1
+
+        # Override the done signal from enivronment
+        done = self.steps > 800
+
         return obs, reward, done, False, info
 
     def reset(self, seed=None):
+        self.steps = 0
         return self.env.reset(), {}
 
     def render(self, mode="human"):
@@ -192,6 +212,31 @@ class AirHockeyChallengeGymWrapper(gym.Env):
 
     def close(self):
         pass
+
+
+class VecAirHockeyChallengeGymWrapper(VecEnv):
+
+    def __init__(self, env, num_envs):
+
+        self.env = env
+
+        super().__init__(
+            num_envs=num_envs,
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+        )
+
+    def reset(self) -> np.ndarray:
+        return self.env.reset()
+
+    def step(self, actions: np.ndarray) -> None:
+        return jax.jit(self.env.step(actions))
+
+    def close():
+        return self.env.close()
+
+    def env_is_wrapped(self, wrapper_class, indices=None):
+        return self.env.env_is_wrapped(wrapper_class, indices)
 
 
 if __name__ == "__main__":

@@ -4,13 +4,18 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 
 import wandb
-from air_hockey_challenge.framework import AirHockeyChallengeGymWrapper
+from air_hockey_challenge.framework import (
+    AirHockeyChallengeGymWrapper,
+    VecAirHockeyChallengeGymWrapper,
+)
 from wandb.integration.sb3 import WandbCallback
 
 
 def get_env():
     return AirHockeyChallengeGymWrapper("3dof-hit", interpolation_order=2)
 
+
+vec_env = VecAirHockeyChallengeGymWrapper(get_env(), 10)
 
 wandb.login()
 
@@ -26,13 +31,17 @@ run = wandb.init(
 
 
 # Parallel environments
-vec_env = make_vec_env(get_env, n_envs=16)
+# vec_env = make_vec_env(get_env, n_envs=1)
 
 model = PPO(
-    "MlpPolicy", vec_env, verbose=1, device="cpu", tensorboard_log=f"runs/{run.id}"
+    "MlpPolicy",
+    vec_env,
+    verbose=1,
+    device="cpu",
+    tensorboard_log=f"runs/{run.id}",
 )
 model.learn(
-    total_timesteps=2500000,
+    total_timesteps=5000000,
     callback=WandbCallback(
         gradient_save_freq=100,
         model_save_path=f"models/{run.id}",
